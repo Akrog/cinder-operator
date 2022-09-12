@@ -18,4 +18,10 @@ package cinderscheduler
 const (
 	// KollaConfig -
 	KollaConfig = "/var/lib/config-data/merged/cinder-scheduler-config.json"
+	// ServiceCommand -
+	ServiceCommand = "/usr/local/bin/kolla_set_configs && /usr/local/bin/kolla_start"
+	// ProbeCommand run with 'bash -c'.  Requires -E to preserve env variables
+	ProbeCommand = "sudo -E /usr/local/bin/kolla_set_configs && /usr/local/bin/container-scripts/healthcheck.py scheduler"
+	// ProbeDebug run with 'bash -c'.  Requires -E to preserve env variables
+	ProbeDebug = "sudo -E /usr/local/bin/kolla_set_configs && /bin/sleep infinity"
 )

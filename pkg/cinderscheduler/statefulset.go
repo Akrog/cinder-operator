@@ -25,11 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
-
-const (
-	// ServiceCommand -
-	ServiceCommand = "/usr/local/bin/kolla_set_configs && /usr/local/bin/kolla_start"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // StatefulSet func
@@ -38,7 +34,11 @@ func StatefulSet(
 	configHash string,
 	labels map[string]string,
 ) *appsv1.StatefulSet {
-	runAsUser := int64(0)
+	rootUser := int64(0)
+	// Cinder's uid and gid magic numbers come from the 'cinder-user' in
+	// https://github.com/openstack/kolla/blob/master/kolla/common/users.py
+	cinderUser := int64(42407)
+	cinderGroup := int64(42407)
 
 	// TODO until we determine how to properly query for these
 	livenessProbe := &corev1.Probe{
@@ -55,7 +55,11 @@ func StatefulSet(
 		InitialDelaySeconds: 5,
 	}
 
+	bashCommand := []string{"/bin/bash"}
 	args := []string{"-c"}
+	probeArgs := []string{"-c"}
+	// When debugging the service container will run kolla_set_configs and
+	// sleep forever and the probe container will just sleep forever.
 	if instance.Spec.Debug.Service {
 		args = append(args, common.DebugCommand)
 		livenessProbe.Exec = &corev1.ExecAction{
@@ -63,22 +67,24 @@ func StatefulSet(
 				"/bin/true",
 			},
 		}
+		startupProbe.Exec = livenessProbe.Exec
+		probeArgs = append(probeArgs, ProbeDebug)
 	} else {
 		args = append(args, ServiceCommand)
-		livenessProbe.Exec = &corev1.ExecAction{
-			Command: []string{
-				"/usr/local/bin/container-scripts/healthcheck.sh",
-				"cinder-scheduler",
-			},
+		livenessProbe.HTTPGet = &corev1.HTTPGetAction{
+			Port: intstr.FromInt(8080),
 		}
+		startupProbe.HTTPGet = livenessProbe.HTTPGet
+		probeArgs = append(probeArgs, ProbeCommand)
 	}
-	startupProbe.Exec = livenessProbe.Exec
 
 	envVars := map[string]env.Setter{}
 	envVars["KOLLA_CONFIG_FILE"] = env.SetValue(KollaConfig)
 	envVars["KOLLA_CONFIG_STRATEGY"] = env.SetValue("COPY_ALWAYS")
 	envVars["CONFIG_HASH"] = env.SetValue(configHash)
 
+	volumeMounts := GetVolumeMounts()
+	finalEnvs := env.MergeEnvs([]corev1.EnvVar{}, envVars)
 	statefulset := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
@@ -97,20 +103,30 @@ func StatefulSet(
 					ServiceAccountName: cinder.ServiceAccount,
 					Containers: []corev1.Container{
 						{
-							Name: cinder.ServiceName + "-scheduler",
-							Command: []string{
-								"/bin/bash",
-							},
-							Args:  args,
-							Image: instance.Spec.ContainerImage,
+							Name:    cinder.ServiceName + "-scheduler",
+							Command: bashCommand,
+							Args:    args,
+							Image:   instance.Spec.ContainerImage,
 							SecurityContext: &corev1.SecurityContext{
-								RunAsUser: &runAsUser,
+								RunAsUser: &rootUser,
 							},
-							Env:            env.MergeEnvs([]corev1.EnvVar{}, envVars),
-							VolumeMounts:   GetVolumeMounts(),
-							Resources:      instance.Spec.Resources,
-							LivenessProbe:  livenessProbe,
-							StartupProbe:   startupProbe,
+							Env:           finalEnvs,
+							VolumeMounts:  volumeMounts,
+							Resources:     instance.Spec.Resources,
+							LivenessProbe: livenessProbe,
+							StartupProbe:  startupProbe,
+						},
+						{
+							Name:    "probe",
+							Command: bashCommand,
+							Args:    probeArgs,
+							Image:   instance.Spec.ContainerImage,
+							SecurityContext: &corev1.SecurityContext{
+								RunAsUser:  &cinderUser,
+								RunAsGroup: &cinderGroup,
+							},
+							Env:          finalEnvs,
+							VolumeMounts: volumeMounts,
 						},
 					},
 					NodeSelector: instance.Spec.NodeSelector,
